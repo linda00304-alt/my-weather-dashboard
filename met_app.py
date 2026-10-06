@@ -1,59 +1,60 @@
-# Open API Service 1 - Explore Artworks with the MET Museum API
-# The museum keeps the data. Our app asks for it and displays it.
-
-import requests
 import streamlit as st
+import requests
+import pandas as pd
+import folium
+from streamlit_folium import st_folium
 
-SEARCH_URL = "https://collectionapi.metmuseum.org/public/collection/v1.1/search"
-OBJECT_URL = "https://collectionapi.metmuseum.org/public/collection/v1/objects"
+# Page configuration
+st.set_page_config(page_title="Interactive Weather & Air Quality Map", page_icon="🗺️")
 
+st.title("🗺️ Interactive Global Weather & Air Quality Map")
+st.caption("Click anywhere on the map to get real-time weather and air quality data using Open-Meteo API.")
 
-@st.cache_data(ttl=3600)  # remember answers for 1 hour
-def search_ids(query, limit):
-    """Step 1: search returns only a list of object IDs."""
-    resp = requests.get(
-        SEARCH_URL,
-        params={"q": query, "hasImages": "true", "limit": limit},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    return resp.json().get("objectIDs") or []   # no results gives null, so use []
+# 1. Initialize Folium Map (Default centered near Seoul)
+m = folium.Map(location=[37.5665, 126.9780], zoom_start=5)
 
+# Render map in Streamlit and capture user click events
+map_data = st_folium(m, width=700, height=400)
 
-@st.cache_data(ttl=3600)
-def get_object(object_id):
-    """Step 2: ask for the details of one artwork."""
-    resp = requests.get(f"{OBJECT_URL}/{object_id}", timeout=10)
-    resp.raise_for_status()
-    return resp.json()
+# 2. Extract latitude and longitude when user clicks on the map
+if map_data and map_data.get("last_clicked"):
+    lat = map_data["last_clicked"]["lat"]
+    lon = map_data["last_clicked"]["lng"]
+    st.success(f"📍 Selected Location: Latitude {lat:.4f}, Longitude {lon:.4f}")
 
+    # Fetch Weather API
+    weather_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true&hourly=temperature_2m,relative_humidity_2m"
+    w_res = requests.get(weather_url).json()
 
-st.set_page_config(page_title="Explore Artworks", layout="centered")
-st.title("Explore Artworks with the MET Museum API")
-st.caption("Arts and Advanced Big Data | Open API, Service 1")
+    # Fetch Air Quality API
+    air_url = f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&current=pm10,pm2_5"
+    a_res = requests.get(air_url).json()
 
-query = st.text_input("Search for Artworks", "flower")
-count = st.slider("How many artworks to show", 3, 12, 6)
+    if "current_weather" in w_res:
+        curr_w = w_res["current_weather"]
+        curr_a = a_res.get("current", {})
 
-if query.strip():
-    try:
-        ids = search_ids(query.strip(), count)
-        if not ids:
-            st.info("No artworks found. Try another word, for example: cat, ocean, gold.")
-        cols = st.columns(3)
-        for i, object_id in enumerate(ids):
-            art = get_object(object_id)
-            image = art.get("primaryImageSmall")
-            if not image:
-                continue
-            with cols[i % 3]:
-                st.image(image, width="stretch")
-                st.markdown(f"**{art.get('title', 'Untitled')}**")
-                st.write(f"Artist: {art.get('artistDisplayName') or 'Unknown'}")
-                st.write(f"Year: {art.get('objectDate') or 'Unknown'}")
-                if art.get("objectURL"):
-                    st.markdown(f"[View at the Met]({art['objectURL']})")
-    except requests.RequestException:
-        st.error("Could not reach the museum's service right now. Please try again in a minute.")
+        st.subheader("📌 Current Atmospheric Conditions")
+        
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Temperature", f"{curr_w['temperature']} °C")
+        col2.metric("Wind Speed", f"{curr_w['windspeed']} km/h")
+        col3.metric("Particulate Matter (PM10)", f"{curr_a.get('pm10', 'N/A')} µg/m³")
 
-st.caption("Data: The Metropolitan Museum of Art Collection API (Open Access, CC0).")
+        # Hourly temperature forecast chart
+        st.write("---")
+        st.subheader("📈 Hourly Temperature Forecast (Next 24 Hours)")
+        
+        hourly_time = w_res["hourly"]["time"][:24]
+        hourly_temp = w_res["hourly"]["temperature_2m"][:24]
+        
+        df = pd.DataFrame({
+            "Time": [t.split("T")[1] for t in hourly_time],
+            "Temperature (°C)": hourly_temp
+        })
+        
+        st.line_chart(df.set_index("Time"))
+    else:
+        st.error("Failed to retrieve weather data for the selected point.")
+else:
+    st.info("💡 Click any point on the map above to view its weather and air quality forecast!")
